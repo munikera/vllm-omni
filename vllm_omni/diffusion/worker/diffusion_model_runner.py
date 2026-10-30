@@ -72,6 +72,7 @@ from vllm_omni.diffusion.sched.interface import (
     NewRequestData,
     validate_new_request_data_identity,
 )
+from vllm_omni.diffusion.worker.flashinfer_autotune import autotune_flashinfer_mxfp8
 from vllm_omni.diffusion.worker.input_batch import InputBatch, scatter_latents
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.diffusion.worker.stage_payload import DiffusionStagePayloadMixin
@@ -191,6 +192,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
         self.input_batch: InputBatch | None = None
         self._interaction_coordinator: InteractionCoordinator | None = None
         self.model_memory_usage = 0
+        self._flashinfer_autotuned = False
         self.diffusion_kv_backend = DiffusionKVModelRunnerBackend(
             vllm_config=vllm_config,
             od_config=od_config,
@@ -793,6 +795,12 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
         for req in reqs:
             if req.prompt is None:
                 raise ValueError("Cannot execute model with empty prompt")
+        if not getattr(self, "_flashinfer_autotuned", False) and any(
+            OmniDiffusionRequest.is_dummy_run_request_id(getattr(req, "request_id", None)) for req in reqs
+        ):
+            # Startup warmup: tune FlashInfer kernels once, before the first real request.
+            self._flashinfer_autotuned = True
+            autotune_flashinfer_mxfp8(self.pipeline)
         if require_request_batch_support and not getattr(self.pipeline, "supports_request_batch", False):
             raise RuntimeError(f"{type(self.pipeline).__name__} does not support request-batch forward.")
 

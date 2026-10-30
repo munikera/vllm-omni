@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     CUDA_HOME: str | None = None
     LOCAL_RANK: int = 0
     VLLM_OMNI_FUSED_QK_NORM_ROPE_MIN_TOKENS: str | None = None
+    VLLM_OMNI_FLASHINFER_AUTOTUNE: bool = True
+    VLLM_OMNI_FLASHINFER_AUTOTUNE_MAX_TOKENS: int = 81920
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Runtime Env Vars ==================
@@ -34,6 +36,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # "0" = always fuse; unset = each consumer's own measured default. Raw
     # string or None; validated by fused_qk_norm_rope_min_tokens().
     "VLLM_OMNI_FUSED_QK_NORM_ROPE_MIN_TOKENS": lambda: os.environ.get("VLLM_OMNI_FUSED_QK_NORM_ROPE_MIN_TOKENS", None),
+    # Tune FlashInfer's MXFP8 GEMM (mm_mxfp8) for every MXFP8 linear shape when the startup dummy
+    # request reaches the worker. Without it FlashInfer uses a default tactic that can be several
+    # times slower for some shapes. "0" disables.
+    "VLLM_OMNI_FLASHINFER_AUTOTUNE": lambda: os.environ.get("VLLM_OMNI_FLASHINFER_AUTOTUNE", "1") != "0",
+    # Activation rows used for that tuning. FlashInfer covers the M buckets up to the tuned M, so this
+    # should be at least the largest per-rank token count served (Wan2.2 1280x720x81 is 75,600).
+    "VLLM_OMNI_FLASHINFER_AUTOTUNE_MAX_TOKENS": lambda: int(
+        os.environ.get("VLLM_OMNI_FLASHINFER_AUTOTUNE_MAX_TOKENS", "81920")
+    ),
 }
 
 
