@@ -1326,3 +1326,49 @@ def test_graph_runner_is_refused_with_release_after_denoise():
 
     assert "no decode step" in _graph_refusal(SimpleNamespace(diffusion_graph_release_after_denoise=True))
     assert _graph_refusal(SimpleNamespace(diffusion_graph_release_after_denoise=False)) is None
+
+
+# ── Opt-ins: vision_dtype and compile (custom_pipeline_args) ──
+def test_vision_dtype_opt_in_is_validated():
+    from vllm_omni.diffusion.models.pi.pi05.pipeline_pi05 import _vision_dtype
+
+    assert _vision_dtype(None, torch.bfloat16) is None
+    assert _vision_dtype("bfloat16", torch.bfloat16) == torch.bfloat16
+    assert _vision_dtype("float32", torch.bfloat16) == torch.float32
+    with pytest.raises(ValueError, match="requires dtype bfloat16"):
+        _vision_dtype("bfloat16", torch.float32)
+    with pytest.raises(ValueError, match="Unsupported"):
+        _vision_dtype("float16", torch.bfloat16)
+
+
+@pytest.mark.slow
+def test_set_pi_vision_dtype_casts_only_the_vision_path():
+    from vllm_omni.diffusion.models.pi.common import inference_dtype
+
+    model = _tiny_pi05_model()
+    inference_dtype.apply_pi_inference_dtype(model, torch.bfloat16)
+    before = {name: p.dtype for name, p in model.named_parameters()}
+    inference_dtype.set_pi_vision_dtype(model, torch.bfloat16)
+    for name, param in model.named_parameters():
+        if "vision_tower" in name or "multi_modal_projector" in name:
+            assert param.dtype == torch.bfloat16, name
+        else:
+            assert param.dtype == before[name], name
+
+
+def test_pipeline_forwards_compiled_generation_without_a_graph_runner():
+    calls: list = []
+
+    class _RunnerSpy(_SpyModel):
+        def sample_actions(self, *, graph_runner=None, **kwargs):
+            calls.append(graph_runner)
+            return super().sample_actions(**kwargs)
+
+    def compiled(**kwargs):
+        raise AssertionError("the spy model never calls it")
+
+    pipeline = _spy_pipeline(_RunnerSpy())
+    pipeline._denoise_graph_runner = None
+    pipeline._compiled_generate = compiled
+    pipeline.forward(_spy_request(2))
+    assert calls == [compiled]

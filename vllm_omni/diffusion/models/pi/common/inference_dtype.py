@@ -56,3 +56,16 @@ def apply_pi_inference_dtype(model: nn.Module, dtype: torch.dtype) -> None:
     for name, buffer in model.named_buffers():
         if not name.startswith("paligemma_with_expert.") and buffer.is_floating_point():
             buffer.data = buffer.data.to(dtype=torch.float32)
+
+
+def set_pi_vision_dtype(model: nn.Module, dtype: torch.dtype) -> None:
+    """Cast the SigLIP vision tower and multimodal projector to ``dtype``.
+
+    The bf16 layout above keeps them in float32 for LeRobot parity; OpenPI's
+    PyTorch policy runs them in bfloat16, which is faster on GPUs whose float32
+    rate is far below their bf16 matrix rate. ``embed_image`` casts the pixels
+    to the tower's dtype, so nothing else changes.
+    """
+    paligemma = model.paligemma_with_expert.paligemma.model
+    paligemma.vision_tower.to(dtype=dtype)
+    paligemma.multi_modal_projector.to(dtype=dtype)

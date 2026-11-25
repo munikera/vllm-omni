@@ -67,6 +67,18 @@ def _graph_refusal(od_config: OmniDiffusionConfig) -> str | None:
     return None
 
 
+def _vision_dtype(value: object, model_dtype: torch.dtype) -> torch.dtype | None:
+    """``custom_pipeline_args["vision_dtype"]`` → the vision tower dtype, or None to keep the default."""
+    if value is None:
+        return None
+    resolved = getattr(torch, str(value).split(".")[-1], None) if not isinstance(value, torch.dtype) else value
+    if resolved not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"Unsupported π0.5 vision_dtype: {value!r}. Supported: bfloat16, float32.")
+    if resolved == torch.bfloat16 and model_dtype != torch.bfloat16:
+        raise ValueError("π0.5 vision_dtype bfloat16 requires dtype bfloat16.")
+    return resolved
+
+
 def _checkpoint_declared_keys(model_dir: str) -> set[str]:
     """The keys the checkpoint's config.json actually carries."""
     path = os.path.join(model_dir, "config.json")
@@ -109,10 +121,25 @@ class Pi05Pipeline(nn.Module):
 
         self.tokenizer = self._load_tokenizer()
         self.model = self._initialize_model()
+
+        # Opt-ins under custom_pipeline_args, all off by default:
+        # - vision_dtype: "bfloat16" runs the SigLIP tower and projector in bf16
+        #   (OpenPI's layout) instead of LeRobot's float32; needs dtype bfloat16.
+        # - compile: true compiles the generation with torch.compile; the first
+        #   request then takes minutes, later ones reuse the compiled kernels.
+        vision_dtype = _vision_dtype(custom_args.get("vision_dtype"), self._torch_dtype)
+        if vision_dtype is not None:
+            inference_dtype.set_pi_vision_dtype(self.model, vision_dtype)
+        generate = self.model.actions_from_noise
+        if bool(custom_args.get("compile", False)):
+            # The device graph (if any) replays the compiled kernels, so inductor
+            # must not capture graphs of its own.
+            generate = torch.compile(generate, mode="max-autotune-no-cudagraphs", dynamic=False)
+            self._compiled_generate = generate
         # Opt-in (``diffusion_use_graph``): replays a request's prefix and whole
         # Euler loop as one device graph per (batch, num_steps); None stays eager.
         self._denoise_graph_runner = build_denoise_graph_runner(
-            od_config, self.model.actions_from_noise, "Pi05", refusal=_graph_refusal(od_config)
+            od_config, generate, "Pi05", refusal=_graph_refusal(od_config)
         )
 
         self.processor = Pi05Processor(self.config, self.tokenizer, self._device)
@@ -232,8 +259,9 @@ class Pi05Pipeline(nn.Module):
 
         images, image_masks, lang_tokens, lang_masks = self.processor.build_model_inputs(robot_obs)
 
-        # Only an engaged runner is forwarded; eager keeps the plain call.
-        runner = getattr(self, "_denoise_graph_runner", None)
+        # Only an engaged runner (or the compiled generation) is forwarded; eager
+        # keeps the plain call.
+        runner = getattr(self, "_denoise_graph_runner", None) or getattr(self, "_compiled_generate", None)
         actions = self.model.sample_actions(
             images=images,
             image_masks=image_masks,
